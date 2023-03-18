@@ -1,16 +1,16 @@
+use itertools::{Either, Itertools};
 use kafka::consumer::{Consumer, Message};
 use thiserror::Error;
-use itertools::{Itertools, Either};
 
 #[derive(Debug)] //FIXME: Remove
-pub struct KafkaRecord<K: Sized,P: Sized> {
+pub struct KafkaRecord<K: Sized, P: Sized> {
     pub key: K,
     pub payload: P,
 }
 
 impl<K, P> KafkaRecord<K, P> {
     pub fn new(k: K, p: P) -> KafkaRecord<K, P> {
-        return KafkaRecord{ key: k, payload: p }
+        KafkaRecord { key: k, payload: p }
     }
 }
 
@@ -28,50 +28,60 @@ impl From<kafka::Error> for MaterlializeError {
         MaterlializeError::IOError(value.to_string())
     }
 }
+pub type Result<T> = core::result::Result<T, MaterlializeError>;
+pub type SideEffect = Result<()>;
 
-pub trait ByteDeserializer : Sized {
-    fn deserialize(payload: &[u8]) -> Result<Self, String>;
+pub trait ByteDeserializer: Sized {
+    fn deserialize(payload: &[u8]) -> core::result::Result<Self, String>;
 }
 
 impl ByteDeserializer for String {
-    fn deserialize(payload: &[u8]) -> Result<Self, String> {
-        return Ok(String::from_utf8_lossy(payload).to_string())
+    fn deserialize(payload: &[u8]) -> core::result::Result<Self, String> {
+        return Ok(String::from_utf8_lossy(payload).to_string());
     }
 }
 
 // pub trait RecordWriter<Key, Payload>: Sized {
-//     fn write(record: &[&KafkaRecord<Key, Payload>]) -> Result<(), MaterlializeError>;
+//     fn write(record: &[&KafkaRecord<Key, Payload>]) -> SideEffect;
 // }
 
-fn decode<Key: ByteDeserializer, Payload: ByteDeserializer>(msg: &Message) -> Result<KafkaRecord<Key, Payload>, MaterlializeError> {
+fn decode<Key: ByteDeserializer, Payload: ByteDeserializer>(
+    msg: &Message,
+) -> Result<KafkaRecord<Key, Payload>> {
     let key: Key = Key::deserialize(msg.key)
         .map_err(|e| MaterlializeError::DeserializeError(msg.offset, e))?;
     let payload: Payload = Payload::deserialize(msg.value)
         .map_err(|e| MaterlializeError::DeserializeError(msg.offset, e))?;
-    return Ok(KafkaRecord::new(key, payload))
+    Ok(KafkaRecord::new(key, payload))
 }
 
 //Fixme: This should be automatically converted, see https://docs.rs/itertools/latest/itertools/enum.Either.html#impl-Into%3CResult%3CR%2C%20L%3E%3E-for-Either%3CL%2C%20R%3E
-fn decode_to_either<Key: ByteDeserializer, Payload: ByteDeserializer>(msg: &Message) -> Either<MaterlializeError, KafkaRecord<Key, Payload>> {
+fn decode_to_either<Key: ByteDeserializer, Payload: ByteDeserializer>(
+    msg: &Message,
+) -> Either<MaterlializeError, KafkaRecord<Key, Payload>> {
     match decode(msg) {
         Ok(r) => Either::Right(r),
-        Err(e) => Either::Left(e)
+        Err(e) => Either::Left(e),
     }
 }
 
 pub fn materialize<Key: ByteDeserializer, Payload: ByteDeserializer>(
     mut consumer: Consumer,
-    write_batch: fn(Vec<KafkaRecord<Key, Payload>>) -> Result<(), MaterlializeError>,
-    deadletter_handler: fn(Vec<MaterlializeError>) -> Result<(), MaterlializeError>
-) -> Result<(), MaterlializeError> {
+    write_batch: fn(Vec<KafkaRecord<Key, Payload>>) -> SideEffect,
+    deadletter_handler: fn(Vec<MaterlializeError>) -> SideEffect,
+) -> SideEffect {
     println!("Starting");
     loop {
         println!("Polling...");
         for ms in consumer.poll()?.iter() {
-            println!("Consuming batch from topic {}, partition {}, size {}",
-                     ms.topic(), ms.partition(), ms.messages().len());
+            println!(
+                "Consuming batch from topic {}, partition {}, size {}",
+                ms.topic(),
+                ms.partition(),
+                ms.messages().len()
+            );
             let (errors, records): (Vec<_>, Vec<_>) =
-                ms.messages().into_iter().partition_map( decode_to_either);
+                ms.messages().iter().partition_map(decode_to_either);
             write_batch(records)?;
             deadletter_handler(errors)?;
 
